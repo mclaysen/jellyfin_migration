@@ -3,15 +3,23 @@ import shutil
 import re
 import argparse
 from collections import defaultdict
+from typing import DefaultDict, List
 
 # Configuration
 ROOT_DIR = "/Volumes/media/home_videos/home"
 
-def update_nfo(nfo_path, new_title, dry_run=False):
+class HomeVideo:
+    def __init__(self, item_name, year, title, final_name):
+        self.item_name = item_name
+        self.year = year
+        self.title = title
+        self.final_name = final_name
+
+def update_nfo(nfo_path, new_title, new_year, dry_run=False):
     """Updates the <title> tag in the NFO file."""
     try:
         if dry_run:
-            print(f"  [DRY RUN] Would update NFO title to: {new_title}")
+            print(f"  [DRY RUN] Would update NFO title to: {new_title} and year to: {new_year} in {nfo_path}")
             return
 
         with open(nfo_path, 'r', encoding='utf-8') as f:
@@ -26,11 +34,20 @@ def update_nfo(nfo_path, new_title, dry_run=False):
         replacement = f"\\1{new_title}\\3"
         
         new_content = re.sub(pattern, replacement, content, flags=re.IGNORECASE)
+        if content != new_content:
+            with open(nfo_path, 'w', encoding='utf-8') as f:
+                f.write(new_content)
+        # update the <year /> tag with the year from the new title if possible
+        # Matches <year>1234</year> or <year/> or <year />
+        pattern_year = r"<year(?:\s+[^>]*)?(?:>.*?</year>|(?:\s*/>))"
+        replacement = f"<year>{new_year}</year>"
+
+        new_content = re.sub(pattern_year, replacement, new_content, flags=re.IGNORECASE)
 
         if content != new_content:
             with open(nfo_path, 'w', encoding='utf-8') as f:
                 f.write(new_content)
-            # print(f"  Updated NFO title to: {new_title}")
+
 
     except Exception as e:
         print(f"  Error updating NFO {nfo_path}: {e}")
@@ -51,13 +68,14 @@ def migrate_media(target_subdir, original_group, dry_run=False):
         
         # Group items by their "Base Name" (e.g. "Miscellaneous - S1989E01 - Around the house")
         # We strip extensions and "-poster" suffixes to find the common root.
-        grouped_items = defaultdict(list)
+        grouped_items: DefaultDict[str, List[str]] = defaultdict(list)
+        home_videos = []
         
         for item in all_items:
             if not item.startswith(original_group):
                 continue
                 
-            # Ignore if we are already in a "Moments" folder (avoid processing output if re-run)
+            # Ignore if we are already in a folder (avoid processing output if re-run)
             if os.path.basename(root) == target_subdir:
                 continue
 
@@ -73,9 +91,12 @@ def migrate_media(target_subdir, original_group, dry_run=False):
                 name_no_ext = name_no_ext[:-7]
             
             grouped_items[name_no_ext].append(item)
-
+            
         # Process each group
         for base_key, items in grouped_items.items():
+
+            files_to_move : List[HomeVideo] = []
+
             # Parse the Name
             # Expected format: Miscellaneous - S(YYYY)E(XX) - (Title)
             pattern = rf"{re.escape(original_group)} - S(\d{{4}})E\d+ - (.*)"
@@ -87,12 +108,12 @@ def migrate_media(target_subdir, original_group, dry_run=False):
             
             year = match.group(1)
             raw_title = match.group(2).strip()
-            
+
             # Construct new filename base: "Title (Year)"
             new_base_name = f"{raw_title} ({year})"
             
             # Destination directory: home/<year>/<target_subdir>    
-            dest_dir = os.path.join(ROOT_DIR, year, target_subdir)
+            dest_dir = os.path.join(ROOT_DIR, year, target_subdir, new_base_name)
             
             if not os.path.exists(dest_dir):
                 if dry_run:
@@ -143,29 +164,32 @@ def migrate_media(target_subdir, original_group, dry_run=False):
 
             # Perform Moves
             # If we had a collision, final_base_name is now "Title (Year) (2)" etc.
-            
             for item in items:
-                source_path = os.path.join(root, item)
+                files_to_move.append(HomeVideo(item_name=item, year=year, title=raw_title, final_name=final_base_name))
+
+            
+            for item in files_to_move:
+                source_path = os.path.join(root, item.item_name)
                 
-                suffix = item[len(base_key):]
-                target_name = final_base_name + suffix
+                suffix = item.item_name[len(base_key):]
+                target_name = item.final_name + suffix
                 target_path = os.path.join(dest_dir, target_name)
                 
                 action_word = "Would move" if dry_run else "Moving"
-                print(f"{action_word}: '{item}' -> '{year}/{target_subdir}/{target_name}'")
+                print(f"{action_word}: '{item.item_name}' -> {target_path}")
                 
                 if not dry_run:
                     try:
                         shutil.move(source_path, target_path)
                         
                         if target_name.endswith(".nfo"):
-                            update_nfo(target_path, final_base_name, dry_run=False)
+                            update_nfo(target_path, item.final_name, item.year, dry_run=False)
                             
                     except Exception as e:
-                        print(f"FAILED to move {item}: {e}")
+                        print(f"FAILED to move {item.item_name}: {e}")
                 elif target_name.endswith(".nfo"):
                          # In dry run, we still want to simulate the NFO update log
-                         update_nfo(target_path, final_base_name, dry_run=True)
+                         update_nfo(target_path, item.final_name, item.year, dry_run=True)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="MigrateJellyfinFiles", description="Migrate directory to work with Jellyfin.")
